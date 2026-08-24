@@ -1,11 +1,14 @@
 # Build the React frontend
 FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
-COPY frontend/package*.json ./
+# Only copy package.json (not package-lock.json) to avoid Windows->Alpine native binary issues with esbuild
+COPY frontend/package.json ./
 # Ensure devDependencies are installed by unsetting NODE_ENV
 ENV NODE_ENV=development
 RUN npm install
 COPY frontend/ ./
+# Limit memory to prevent Out-Of-Memory (OOM) errors on free tiers during Vite build
+ENV NODE_OPTIONS="--max-old-space-size=256"
 RUN npm run build
 
 # Build the Node.js backend
@@ -15,8 +18,8 @@ WORKDIR /app
 # Install Ghostscript
 RUN apk add --no-cache ghostscript
 
-# Copy backend files
-COPY backend/package*.json ./backend/
+# Copy backend files (ignore package-lock.json to avoid cross-platform issues)
+COPY backend/package.json ./backend/
 WORKDIR /app/backend
 RUN npm install --production
 COPY backend/ ./
