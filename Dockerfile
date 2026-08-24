@@ -1,7 +1,7 @@
 # Build the React frontend
-FROM node:18-alpine AS frontend-builder
+FROM node:20 AS frontend-builder
 WORKDIR /app/frontend
-# Only copy package.json (not package-lock.json) to avoid Windows->Alpine native binary issues with esbuild
+# Only copy package.json (not package-lock.json) to avoid Windows->Linux native binary issues with esbuild
 COPY frontend/package.json ./
 # Ensure devDependencies are installed by unsetting NODE_ENV
 ENV NODE_ENV=development
@@ -12,7 +12,7 @@ ENV NODE_OPTIONS="--max-old-space-size=256"
 RUN npm run build
 
 # Build the Node.js backend
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /app
 
 # Install Ghostscript
