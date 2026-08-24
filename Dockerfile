@@ -15,8 +15,8 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app
 
-# Install Ghostscript
-RUN apk add --no-cache ghostscript
+# Install Ghostscript and required fonts
+RUN apk add --no-cache ghostscript ghostscript-fonts
 
 # Copy backend files (ignore package-lock.json to avoid cross-platform issues)
 COPY backend/package.json ./backend/

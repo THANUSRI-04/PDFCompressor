@@ -32,7 +32,8 @@ function compressPDF(inputPath, outputPath, compressionSetting = '/ebook') {
 
         const command = `${gsCmd} ${args.join(' ')}`;
 
-        exec(command, (error, stdout, stderr) => {
+        // Increase maxBuffer to 50MB to prevent crashes if Ghostscript outputs a lot of warnings
+        exec(command, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
             if (error) {
                 console.error(`Ghostscript Error: ${stderr || error.message}`);
                 reject(error);
