@@ -133,6 +133,11 @@ function cleanupFiles(paths) {
     });
 }
 
+// Handle API 404s explicitly so they don't fall through to the React SPA fallback
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.url}` });
+});
+
 // Fallback for React SPA (Express 5 compatible)
 app.use((req, res) => {
     res.sendFile(path.join(frontendDistPath, 'index.html'));
