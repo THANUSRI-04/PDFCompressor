@@ -2,7 +2,8 @@
 FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm install
+# Force install of devDependencies which Vite needs to build
+RUN npm install --include=dev
 COPY frontend/ ./
 RUN npm run build
 
