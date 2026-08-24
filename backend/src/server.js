@@ -133,8 +133,8 @@ function cleanupFiles(paths) {
     });
 }
 
-// Fallback for React SPA
-app.get('*', (req, res) => {
+// Fallback for React SPA (Express 5 compatible)
+app.use((req, res) => {
     res.sendFile(path.join(frontendDistPath, 'index.html'));
 });
 
