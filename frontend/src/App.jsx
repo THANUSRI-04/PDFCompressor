@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { UploadCloud, File as FileIcon, X, CheckCircle, Settings, Download, Loader2, ArrowRight } from 'lucide-react';
+import { UploadCloud, File as FileIcon, X, CheckCircle, Settings, Download, Loader2, ArrowRight, RefreshCw, Archive } from 'lucide-react';
 import axios from 'axios';
 
 function App() {
@@ -34,8 +34,7 @@ function App() {
   };
 
   const onDrop = useCallback((acceptedFiles) => {
-    // Only accept PDFs, dropzone handles this partially, but let's be sure
-    const pdfFiles = acceptedFiles.filter(f => f.type === 'application/pdf');
+    const pdfFiles = acceptedFiles.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
     if (pdfFiles.length < acceptedFiles.length) {
       setError('Only PDF files are allowed.');
     } else {
@@ -68,7 +67,6 @@ function App() {
     if (compressionMode === 'target') {
         const targetBytes = targetSizeMB * 1024 * 1024;
         const reductionNeeded = 1 - (targetBytes / totalOrigSize);
-        // Map required reduction to our 0-100 scale (where 100% slider = ~85% reduction)
         const mappedPercent = Math.max(0, Math.min(100, Math.round((reductionNeeded * 100) / 0.85)));
         finalLevel = mappedPercent;
     }
@@ -80,38 +78,25 @@ function App() {
     formData.append('level', finalLevel.toString());
 
     try {
-      const { data } = await axios.post('/api/compress', formData);
-      const { jobId } = data;
-
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await axios.get(`/api/jobs/${jobId}`);
-          if (statusRes.data.state === 'completed') {
-            clearInterval(pollInterval);
-            setResults({
-              files: statusRes.data.returnvalue.metadata.map((meta, i) => ({
-                ...meta,
-                jobId: jobId,
-                fileIndex: i,
-                originalFileIndex: i
-              }))
-            });
-            setIsCompressing(false);
-          } else if (statusRes.data.state === 'failed') {
-            clearInterval(pollInterval);
-            setError('Compression failed: ' + (statusRes.data.failedReason || 'Unknown error'));
-            setIsCompressing(false);
-          }
-        } catch (err) {
-          clearInterval(pollInterval);
-          setError('Failed to fetch job status.');
-          setIsCompressing(false);
-        }
-      }, 2000);
-
+      const response = await axios.post('/api/compress', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      if (response.data && response.data.files && response.data.files.length > 0) {
+        setResults({
+          files: response.data.files.map((file, i) => ({
+            ...file,
+            originalFileIndex: i
+          }))
+        });
+      } else {
+        setError('No compressed files returned.');
+      }
     } catch (err) {
-      console.error(err);
-      setError('An error occurred during upload. Please try again.');
+      console.error('Compression error:', err);
+      const msg = err.response?.data?.error || err.message || 'An error occurred during compression. Please try again.';
+      setError(msg);
+    } finally {
       setIsCompressing(false);
     }
   };
@@ -121,50 +106,61 @@ function App() {
     const originalFile = files[fileResult.originalFileIndex];
     if (!originalFile) return;
 
-    setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: true } }));
+    setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: true, error: null } }));
 
     const formData = new FormData();
     formData.append('pdfs', originalFile);
-    formData.append('level', recompressState[idx].level.toString());
+    formData.append('level', (recompressState[idx]?.level ?? 50).toString());
 
     try {
-      const { data } = await axios.post('/api/compress', formData);
-      const pollJobId = data.jobId;
+      const response = await axios.post('/api/compress', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
 
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await axios.get(`/api/jobs/${pollJobId}`);
-          if (statusRes.data.state === 'completed') {
-            clearInterval(pollInterval);
-            const newMeta = statusRes.data.returnvalue.metadata[0];
-            
-            setResults(prev => {
-              const newFiles = [...prev.files];
-              newFiles[idx] = {
-                ...newMeta,
-                jobId: pollJobId,
-                fileIndex: 0,
-                originalFileIndex: fileResult.originalFileIndex
-              };
-              return { files: newFiles };
-            });
-            
-            setRecompressState(prev => {
-              const next = { ...prev };
-              delete next[idx];
-              return next;
-            });
-          } else if (statusRes.data.state === 'failed') {
-            clearInterval(pollInterval);
-            setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Failed' } }));
-          }
-        } catch (err) {
-          clearInterval(pollInterval);
-          setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Error' } }));
-        }
-      }, 2000);
+      if (response.data && response.data.files && response.data.files.length > 0) {
+        const newFile = response.data.files[0];
+        setResults(prev => {
+          const newFiles = [...prev.files];
+          newFiles[idx] = {
+            ...newFile,
+            originalFileIndex: fileResult.originalFileIndex
+          };
+          return { files: newFiles };
+        });
+        
+        setRecompressState(prev => {
+          const next = { ...prev };
+          delete next[idx];
+          return next;
+        });
+      } else {
+        setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Recompression failed' } }));
+      }
     } catch (err) {
-      setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Error' } }));
+      console.error('Recompression error:', err);
+      setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Failed' } }));
+    }
+  };
+
+  const handleDownloadAll = () => {
+    if (!results || !results.files.length) return;
+    
+    if (results.files.length === 1) {
+      const file = results.files[0];
+      const link = document.createElement('a');
+      link.href = file.downloadUrl || `/api/download/${file.id}`;
+      link.download = `compressed_${file.originalName}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      const ids = results.files.map(f => f.id).join(',');
+      const link = document.createElement('a');
+      link.href = `/api/download-all?ids=${ids}`;
+      link.download = 'compressed_pdfs.zip';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
   };
 
@@ -179,7 +175,7 @@ function App() {
   };
 
   const formatSize = (bytes) => {
-    if (bytes === 0) return '0 Bytes';
+    if (!bytes || bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -236,12 +232,12 @@ function App() {
             Compress PDF
           </h1>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Reduce PDF file size without compromising quality. Fast, secure, and right in your browser.
+            Reduce PDF file size instantly without compromising quality. Fast, secure, and right in your browser.
           </p>
         </div>
 
         <div className="bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100 transition-all">
-          {/* Top Tabs (Visual only) */}
+          {/* Top Tabs */}
           <div className="flex border-b border-gray-100 bg-gray-50/50">
             <div className="px-6 py-4 border-b-2 border-blue-600 text-blue-600 font-medium flex items-center">
               <UploadCloud className="w-4 h-4 mr-2" />
@@ -251,9 +247,9 @@ function App() {
 
           <div className="p-8">
             {error && (
-              <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-xl flex items-start border border-red-100">
+              <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-xl flex items-start border border-red-100 animate-in fade-in duration-300">
                 <X className="w-5 h-5 mr-3 mt-0.5 flex-shrink-0" />
-                <p>{error}</p>
+                <p className="text-sm font-medium">{error}</p>
               </div>
             )}
 
@@ -354,16 +350,16 @@ function App() {
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Target Total Size (MB)</label>
                                 <div className="flex items-center">
                                     <input 
-                                      type="number"
-                                      min="0.1"
-                                      step="0.1"
-                                      value={targetSizeMB}
-                                      onChange={(e) => setTargetSizeMB(parseFloat(e.target.value) || 0)}
+                                      type="number" 
+                                      min="0.1" 
+                                      step="0.1" 
+                                      value={targetSizeMB} 
+                                      onChange={(e) => setTargetSizeMB(parseFloat(e.target.value) || 0)} 
                                       className="w-full bg-gray-50 border border-gray-300 text-gray-900 text-lg rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-3"
                                     />
                                     <span className="ml-3 text-gray-500 font-medium">MB</span>
                                 </div>
-                                <p className="text-xs text-gray-400 mt-2">Note: Ghostscript cannot target exact file sizes. The server will select the closest compression preset based on your target.</p>
+                                <p className="text-xs text-gray-400 mt-2">Note: Ghostscript selects the optimal compression setting based on your target file size.</p>
                             </div>
                         )}
 
@@ -418,7 +414,7 @@ function App() {
                   <CheckCircle className="w-10 h-10 text-green-600" />
                 </div>
                 <h2 className="text-2xl font-bold text-gray-900 mb-2">Compression Complete!</h2>
-                <p className="text-gray-500 mb-8">Your files have been successfully compressed.</p>
+                <p className="text-gray-500 mb-8">Your files have been compressed successfully.</p>
                 
                 <div className="bg-gray-50 rounded-2xl p-6 mb-8 text-left max-w-lg mx-auto border border-gray-100">
                   <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-4 border-b border-gray-200 pb-2">Results</h4>
@@ -439,9 +435,9 @@ function App() {
                                     {fileResult.originalName}
                                  </div>
                                  <div className="flex items-center text-sm mt-1 text-gray-500 space-x-2">
-                                   <span>{(fileResult.originalSize / 1024 / 1024).toFixed(2)} MB</span>
+                                   <span>{formatSize(fileResult.originalSize)}</span>
                                    <span>→</span>
-                                   <span className="font-medium text-green-600">{(fileResult.compressedSize / 1024 / 1024).toFixed(2)} MB</span>
+                                   <span className="font-medium text-green-600">{formatSize(fileResult.compressedSize)}</span>
                                    <span className="bg-green-100 text-green-700 py-0.5 px-2 rounded-full text-xs font-semibold ml-2">
                                       -{savings}%
                                    </span>
@@ -453,12 +449,13 @@ function App() {
                                     <button
                                       onClick={() => setRecompressState(prev => ({ ...prev, [idx]: { isOpen: true, level: 50, loading: false } }))}
                                       className="inline-flex items-center justify-center px-3 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 font-medium transition-colors text-sm border border-gray-200"
+                                      title="Recompress with different level"
                                     >
                                       <Settings className="w-4 h-4 mr-1.5" />
                                       Retry
                                     </button>
                                     <a
-                                      href={`/api/jobs/${fileResult.jobId}/download/${fileResult.fileIndex}`}
+                                      href={fileResult.downloadUrl || `/api/download/${fileResult.id}`}
                                       download={`compressed_${fileResult.originalName}`}
                                       className="inline-flex items-center justify-center px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 font-medium transition-colors text-sm"
                                     >
@@ -490,12 +487,12 @@ function App() {
                                    >
                                      Cancel
                                    </button>
-                                   <button
+                                   <button 
                                      onClick={() => handleRecompressSubmit(idx)}
                                      disabled={rState.loading}
                                      className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg flex items-center transition-colors disabled:opacity-70"
                                    >
-                                     {rState.loading ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <CheckCircle className="w-4 h-4 mr-1.5" />}
+                                     {rState.loading ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1.5" />}
                                      {rState.loading ? 'Compressing...' : 'Apply'}
                                    </button>
                                 </div>
@@ -509,20 +506,20 @@ function App() {
 
                 <div className="flex flex-col sm:flex-row items-center justify-center space-y-3 sm:space-y-0 sm:space-x-4">
                   <button
-                    onClick={() => {
-                      results.files.forEach((fileResult) => {
-                        const link = document.createElement('a');
-                        link.href = `/api/jobs/${fileResult.jobId}/download/${fileResult.fileIndex}`;
-                        link.setAttribute('download', `compressed_${fileResult.originalName}`);
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      });
-                    }}
+                    onClick={handleDownloadAll}
                     className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center shadow-lg shadow-blue-200"
                   >
-                    <Download className="w-5 h-5 mr-2" />
-                    {results.files.length > 1 ? 'Download All Files' : 'Download PDF'}
+                    {results.files.length > 1 ? (
+                      <>
+                        <Archive className="w-5 h-5 mr-2" />
+                        Download All as ZIP
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-5 h-5 mr-2" />
+                        Download PDF
+                      </>
+                    )}
                   </button>
                   <button 
                     onClick={reset}
@@ -544,8 +541,7 @@ function App() {
             © {new Date().getFullYear()} PDFCompressor. All rights reserved.
           </p>
           <div className="flex space-x-6 mt-4 md:mt-0">
-            <a href="#" className="text-gray-400 hover:text-gray-500">Privacy Policy</a>
-            <a href="#" className="text-gray-400 hover:text-gray-500">Terms of Service</a>
+            <span className="text-xs text-gray-400">Direct Fast Compression Engine</span>
           </div>
         </div>
       </footer>
