@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { UploadCloud, File as FileIcon, X, CheckCircle, Settings, Download, Loader2, ArrowRight } from 'lucide-react';
 import axios from 'axios';
@@ -12,6 +12,26 @@ function App() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [recompressState, setRecompressState] = useState({});
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setDeferredPrompt(null);
+      }
+    }
+  };
 
   const onDrop = useCallback((acceptedFiles) => {
     // Only accept PDFs, dropzone handles this partially, but let's be sure
@@ -198,6 +218,14 @@ function App() {
             </div>
             <span className="text-xl font-bold text-gray-900 tracking-tight">PDFCompressor</span>
           </div>
+          {deferredPrompt && (
+            <button 
+              onClick={handleInstallClick}
+              className="bg-gray-900 hover:bg-black text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors shadow-sm"
+            >
+              Install App
+            </button>
+          )}
         </div>
       </header>
 
