@@ -52,8 +52,17 @@ app.post('/api/compress', upload.array('pdfs', 20), async (req, res) => {
 
     const { level } = req.body;
     let compressionSetting = '/ebook';
-    if (level === 'high') compressionSetting = '/screen';
-    if (level === 'low') compressionSetting = '/printer';
+    
+    const numericLevel = parseInt(level, 10);
+    if (!isNaN(numericLevel)) {
+        if (numericLevel >= 75) compressionSetting = '/screen';
+        else if (numericLevel >= 50) compressionSetting = '/ebook';
+        else if (numericLevel >= 25) compressionSetting = '/printer';
+        else compressionSetting = '/prepress';
+    } else {
+        if (level === 'high') compressionSetting = '/screen';
+        if (level === 'low') compressionSetting = '/printer';
+    }
 
     try {
         const compressedFiles = [];
@@ -64,7 +73,13 @@ app.post('/api/compress', upload.array('pdfs', 20), async (req, res) => {
             
             await compressPDF(inputPath, outputPath, compressionSetting);
             
-            const stats = fs.statSync(outputPath);
+            let stats = fs.statSync(outputPath);
+            if (stats.size >= file.size) {
+                // If compression didn't reduce size, just use the original file
+                fs.copyFileSync(inputPath, outputPath);
+                stats = fs.statSync(outputPath);
+            }
+
             compressedFiles.push({
                 originalName: file.originalname,
                 originalSize: file.size,

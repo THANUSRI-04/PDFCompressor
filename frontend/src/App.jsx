@@ -5,7 +5,7 @@ import axios from 'axios';
 
 function App() {
   const [files, setFiles] = useState([]);
-  const [level, setLevel] = useState('recommended');
+  const [compressionPercent, setCompressionPercent] = useState(50);
   const [isCompressing, setIsCompressing] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
@@ -43,7 +43,7 @@ function App() {
     files.forEach(file => {
       formData.append('pdfs', file);
     });
-    formData.append('level', level);
+    formData.append('level', compressionPercent.toString());
 
     try {
       const response = await axios.post('/api/compress', formData, {
@@ -100,7 +100,7 @@ function App() {
     setFiles([]);
     setResults(null);
     setError(null);
-    setLevel('recommended');
+    setCompressionPercent(50);
   };
 
   const formatSize = (bytes) => {
@@ -116,6 +116,10 @@ function App() {
     const reduction = ((orig - comp) / orig) * 100;
     return reduction > 0 ? reduction.toFixed(1) : 0;
   };
+
+  const totalOriginalSize = files.reduce((acc, file) => acc + file.size, 0);
+  const estimatedReduction = Math.round(compressionPercent * 0.85);
+  const estimatedCompressedSize = totalOriginalSize * (1 - estimatedReduction / 100);
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
@@ -217,30 +221,38 @@ function App() {
                         <Settings className="w-4 h-4 mr-2" />
                         Compression Level
                       </h4>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {[
-                          { id: 'high', label: 'High Compression', desc: 'Smallest file size, lower quality' },
-                          { id: 'recommended', label: 'Recommended', desc: 'Good compression, good quality' },
-                          { id: 'low', label: 'Low Compression', desc: 'Less compression, high quality' }
-                        ].map((opt) => (
-                          <div 
-                            key={opt.id}
-                            onClick={() => setLevel(opt.id)}
-                            className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                              level === opt.id 
-                                ? 'border-blue-600 bg-blue-50/50' 
-                                : 'border-gray-200 hover:border-blue-300'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between mb-1">
-                              <span className={`font-semibold ${level === opt.id ? 'text-blue-700' : 'text-gray-900'}`}>
-                                {opt.label}
-                              </span>
-                              {level === opt.id && <CheckCircle className="w-5 h-5 text-blue-600" />}
-                            </div>
-                            <p className="text-xs text-gray-500">{opt.desc}</p>
+                      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                        <div className="flex justify-between items-center mb-4">
+                          <span className="text-sm font-medium text-gray-500">0%</span>
+                          <span className="text-2xl font-bold text-blue-600">{compressionPercent}%</span>
+                          <span className="text-sm font-medium text-gray-500">100%</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="100" 
+                          value={compressionPercent}
+                          onChange={(e) => setCompressionPercent(parseInt(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mb-6"
+                        />
+                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col sm:flex-row justify-between items-center text-sm">
+                          <div className="mb-2 sm:mb-0">
+                            <span className="text-gray-500 mr-2">Original Size:</span>
+                            <span className="font-semibold text-gray-900">{formatSize(totalOriginalSize)}</span>
                           </div>
-                        ))}
+                          <div className="mb-2 sm:mb-0">
+                            <span className="text-gray-500 mr-2">Estimated Output:</span>
+                            <span className="font-semibold text-blue-700">
+                              {totalOriginalSize < 100 * 1024 ? 'Minimal reduction' : `~${formatSize(estimatedCompressedSize)}`}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 mr-2">Estimated Reduction:</span>
+                            <span className="font-semibold text-green-600">
+                              {totalOriginalSize < 100 * 1024 ? '0%' : `~${estimatedReduction}%`}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -295,7 +307,11 @@ function App() {
                             </div>
                             <div>
                                <p className="text-gray-500 text-xs">Reduced By</p>
-                               <p className="font-semibold text-blue-600">{calculateReduction(meta.originalSize, meta.compressedSize)}%</p>
+                               {calculateReduction(meta.originalSize, meta.compressedSize) > 0 ? (
+                                  <p className="font-semibold text-blue-600">{calculateReduction(meta.originalSize, meta.compressedSize)}%</p>
+                               ) : (
+                                  <p className="font-semibold text-gray-500 text-xs mt-0.5 leading-tight">No significant<br/>reduction</p>
+                               )}
                             </div>
                          </div>
                       </div>
