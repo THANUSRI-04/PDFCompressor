@@ -72,7 +72,7 @@ function startWorkerApp() {
         }
     });
 
-    app.get('/api/jobs-internal/:localJobId/download/:fileIndex?', async (req, res) => {
+    app.get('/api/jobs-internal/:localJobId/download/:fileIndex', async (req, res) => {
         const { localJobId, fileIndex } = req.params;
         const status = await getJobStatus(localJobId);
         if (!status || status.state !== 'completed') {
