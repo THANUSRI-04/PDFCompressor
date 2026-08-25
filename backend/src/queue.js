@@ -22,7 +22,11 @@ if (!useLocalQueue) {
   connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
   compressQueue = new Queue(queueName, {
     connection,
-    defaultJobOptions: { removeOnComplete: true, removeOnFail: true, timeout: compressionTimeout }
+    defaultJobOptions: { 
+        removeOnComplete: { age: 3600 }, 
+        removeOnFail: { age: 3600 }, 
+        timeout: compressionTimeout 
+    }
   });
 } else {
   compressQueue = {
