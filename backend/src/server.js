@@ -28,6 +28,8 @@ function createZipArchive(options) {
 // CORS setup
 app.use(cors({
     origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
     exposedHeaders: ['Content-Disposition', 'X-Compression-Results']
 }));
 app.use(express.json());

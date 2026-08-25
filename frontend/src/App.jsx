@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { UploadCloud, File as FileIcon, X, CheckCircle, Settings, Download, Loader2, ArrowRight, RefreshCw, Archive } from 'lucide-react';
-import axios from 'axios';
+import { apiClient, getDownloadUrl, getDownloadAllUrl, checkBackendHealth } from './api';
 
 function App() {
   const [files, setFiles] = useState([]);
@@ -13,6 +13,7 @@ function App() {
   const [error, setError] = useState(null);
   const [recompressState, setRecompressState] = useState({});
   const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [backendStatus, setBackendStatus] = useState('checking'); // 'checking' | 'ready' | 'waking' | 'error'
 
   useEffect(() => {
     const handleBeforeInstallPrompt = (e) => {
@@ -21,6 +22,29 @@ function App() {
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, []);
+
+  // Pre-warm backend on load to mitigate Render cold-start latency
+  useEffect(() => {
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      if (isMounted) setBackendStatus('waking');
+    }, 2500);
+
+    checkBackendHealth().then(res => {
+      clearTimeout(timer);
+      if (!isMounted) return;
+      if (res.ok) {
+        setBackendStatus('ready');
+      } else {
+        setBackendStatus('ready'); // Still allow attempt even if ping failed
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
   }, []);
 
   const handleInstallClick = async () => {
@@ -34,7 +58,11 @@ function App() {
   };
 
   const onDrop = useCallback((acceptedFiles) => {
-    const pdfFiles = acceptedFiles.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+    const pdfFiles = acceptedFiles.filter(f => 
+      f.type === 'application/pdf' || 
+      f.type === 'application/x-pdf' || 
+      f.name.toLowerCase().endsWith('.pdf')
+    );
     if (pdfFiles.length < acceptedFiles.length) {
       setError('Only PDF files are allowed.');
     } else {
@@ -46,9 +74,19 @@ function App() {
     })));
   }, []);
 
+  const onDropRejected = useCallback((fileRejections) => {
+    if (fileRejections.length > 0) {
+      setError('Some files were rejected. Please ensure you upload valid PDF files.');
+    }
+  }, []);
+
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { 'application/pdf': ['.pdf'] }
+    onDropRejected,
+    accept: { 
+      'application/pdf': ['.pdf'],
+      'application/x-pdf': ['.pdf']
+    }
   });
 
   const removeFile = (fileToRemove) => {
@@ -78,7 +116,7 @@ function App() {
     formData.append('level', finalLevel.toString());
 
     try {
-      const response = await axios.post('/api/compress', formData, {
+      const response = await apiClient.post('/api/compress', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       
@@ -89,13 +127,18 @@ function App() {
             originalFileIndex: i
           }))
         });
+        setBackendStatus('ready');
       } else {
         setError('No compressed files returned.');
       }
     } catch (err) {
       console.error('Compression error:', err);
-      const msg = err.response?.data?.error || err.message || 'An error occurred during compression. Please try again.';
-      setError(msg);
+      if (err.message === 'Network Error' || err.code === 'ECONNABORTED') {
+        setError('Network Error: The compression server is waking up or connection was interrupted. Please wait 10 seconds and try again.');
+      } else {
+        const msg = err.response?.data?.error || err.message || 'An error occurred during compression. Please try again.';
+        setError(msg);
+      }
     } finally {
       setIsCompressing(false);
     }
@@ -113,7 +156,7 @@ function App() {
     formData.append('level', (recompressState[idx]?.level ?? 50).toString());
 
     try {
-      const response = await axios.post('/api/compress', formData, {
+      const response = await apiClient.post('/api/compress', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
@@ -138,7 +181,10 @@ function App() {
       }
     } catch (err) {
       console.error('Recompression error:', err);
-      setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Failed' } }));
+      const msg = err.message === 'Network Error' 
+        ? 'Connection error. Please try again.' 
+        : (err.response?.data?.error || 'Failed');
+      setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: msg } }));
     }
   };
 
@@ -148,15 +194,15 @@ function App() {
     if (results.files.length === 1) {
       const file = results.files[0];
       const link = document.createElement('a');
-      link.href = file.downloadUrl || `/api/download/${file.id}`;
+      link.href = getDownloadUrl(file.downloadUrl || file.id);
       link.download = `compressed_${file.originalName}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
     } else {
-      const ids = results.files.map(f => f.id).join(',');
+      const ids = results.files.map(f => f.id);
       const link = document.createElement('a');
-      link.href = `/api/download-all?ids=${ids}`;
+      link.href = getDownloadAllUrl(ids);
       link.download = 'compressed_pdfs.zip';
       document.body.appendChild(link);
       link.click();
@@ -180,12 +226,6 @@ function App() {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
-
-  const calculateReduction = (orig, comp) => {
-    if (!orig || !comp) return 0;
-    const reduction = ((orig - comp) / orig) * 100;
-    return reduction > 0 ? reduction.toFixed(1) : 0;
   };
 
   const totalOriginalSize = files.reduce((acc, file) => acc + file.size, 0);
@@ -225,18 +265,26 @@ function App() {
         </div>
       </header>
 
+      {/* Backend Warming Banner (if free tier server is spinning up) */}
+      {backendStatus === 'waking' && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-xs text-amber-800 flex items-center justify-center space-x-2 animate-in fade-in duration-300">
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600" />
+          <span>Warming up compression server (initial cloud spin-up takes ~15-30 seconds)...</span>
+        </div>
+      )}
+
       {/* Main Content */}
-      <main className="flex-grow w-full max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <div className="text-center mb-10">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-gray-900 mb-4 tracking-tight">
+      <main className="flex-grow w-full max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-12">
+        <div className="text-center mb-8 md:mb-10">
+          <h1 className="text-3xl md:text-5xl font-extrabold text-gray-900 mb-3 md:mb-4 tracking-tight">
             Compress PDF
           </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Reduce PDF file size instantly without compromising quality. Fast, secure, and right in your browser.
+          <p className="text-base md:text-lg text-gray-600 max-w-2xl mx-auto px-2">
+            Reduce PDF file size instantly without compromising quality. Fast, secure, and works on desktop and mobile.
           </p>
         </div>
 
-        <div className="bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100 transition-all">
+        <div className="bg-white rounded-2xl md:rounded-3xl shadow-xl overflow-hidden border border-gray-100 transition-all">
           {/* Top Tabs */}
           <div className="flex border-b border-gray-100 bg-gray-50/50">
             <div className="px-6 py-4 border-b-2 border-blue-600 text-blue-600 font-medium flex items-center">
@@ -245,7 +293,7 @@ function App() {
             </div>
           </div>
 
-          <div className="p-8">
+          <div className="p-5 md:p-8">
             {error && (
               <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-xl flex items-start border border-red-100 animate-in fade-in duration-300">
                 <X className="w-5 h-5 mr-3 mt-0.5 flex-shrink-0" />
@@ -258,7 +306,7 @@ function App() {
                 {/* Upload Area */}
                 <div 
                   {...getRootProps()} 
-                  className={`border-3 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all duration-200 ${
+                  className={`border-3 border-dashed rounded-2xl p-8 md:p-12 text-center cursor-pointer transition-all duration-200 ${
                     isDragActive 
                       ? 'border-blue-500 bg-blue-50' 
                       : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'
@@ -267,14 +315,17 @@ function App() {
                   <input {...getInputProps()} />
                   <div className="flex justify-center mb-4">
                     <div className="bg-blue-100 p-4 rounded-full text-blue-600">
-                      <UploadCloud className="w-10 h-10" />
+                      <UploadCloud className="w-8 h-8 md:w-10 md:h-10" />
                     </div>
                   </div>
-                  <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                  <h3 className="text-lg md:text-xl font-semibold text-gray-900 mb-2">
                     {isDragActive ? 'Drop your PDFs here' : 'Choose PDF files'}
                   </h3>
-                  <p className="text-gray-500 mb-6">or drag and drop them here</p>
-                  <button className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-6 rounded-xl transition-colors shadow-sm shadow-blue-200">
+                  <p className="text-sm md:text-base text-gray-500 mb-6">or drag and drop them here</p>
+                  <button 
+                    type="button"
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-6 rounded-xl transition-colors shadow-sm shadow-blue-200"
+                  >
                     Browse Files
                   </button>
                 </div>
@@ -287,15 +338,16 @@ function App() {
                     </h4>
                     <div className="space-y-3">
                       {files.map((file, index) => (
-                        <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100">
+                        <div key={index} className="flex items-center justify-between p-3 md:p-4 bg-gray-50 rounded-xl border border-gray-100">
                           <div className="flex items-center space-x-3 overflow-hidden">
-                            <FileIcon className="text-red-500 w-8 h-8 flex-shrink-0" />
+                            <FileIcon className="text-red-500 w-7 h-7 md:w-8 md:h-8 flex-shrink-0" />
                             <div className="truncate">
                               <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
                               <p className="text-xs text-gray-500">{formatSize(file.size)}</p>
                             </div>
                           </div>
                           <button 
+                            type="button"
                             onClick={(e) => { e.stopPropagation(); removeFile(file); }}
                             className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                           >
@@ -314,12 +366,14 @@ function App() {
                         </span>
                         <div className="flex bg-gray-100 rounded-lg p-1">
                            <button 
+                             type="button"
                              onClick={() => setCompressionMode('percentage')}
                              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${compressionMode === 'percentage' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                            >
                              Percentage
                            </button>
                            <button 
+                             type="button"
                              onClick={() => setCompressionMode('target')}
                              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${compressionMode === 'target' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                            >
@@ -327,14 +381,14 @@ function App() {
                            </button>
                         </div>
                       </h4>
-                      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                      <div className="bg-white p-5 md:p-6 rounded-xl border border-gray-200 shadow-sm">
                         
                         {compressionMode === 'percentage' ? (
                             <>
                                 <div className="flex justify-between items-center mb-4">
-                                  <span className="text-sm font-medium text-gray-500">0%</span>
+                                  <span className="text-sm font-medium text-gray-500">0% (Fast)</span>
                                   <span className="text-2xl font-bold text-blue-600">{compressionPercent}%</span>
-                                  <span className="text-sm font-medium text-gray-500">100%</span>
+                                  <span className="text-sm font-medium text-gray-500">100% (Small)</span>
                                 </div>
                                 <input 
                                   type="range" 
@@ -359,16 +413,16 @@ function App() {
                                     />
                                     <span className="ml-3 text-gray-500 font-medium">MB</span>
                                 </div>
-                                <p className="text-xs text-gray-400 mt-2">Note: Ghostscript selects the optimal compression setting based on your target file size.</p>
+                                <p className="text-xs text-gray-400 mt-2">Note: The engine selects the optimal compression setting based on your target file size.</p>
                             </div>
                         )}
 
-                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col sm:flex-row justify-between items-center text-sm">
-                          <div className="mb-2 sm:mb-0">
+                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col sm:flex-row justify-between items-center text-sm gap-2">
+                          <div className="mb-1 sm:mb-0">
                             <span className="text-gray-500 mr-2">Original Total:</span>
                             <span className="font-semibold text-gray-900">{formatSize(totalOriginalSize)}</span>
                           </div>
-                          <div className="mb-2 sm:mb-0">
+                          <div className="mb-1 sm:mb-0">
                             <span className="text-gray-500 mr-2">Estimated Output:</span>
                             <span className="font-semibold text-blue-700">
                               {totalOriginalSize < 100 * 1024 ? 'Minimal reduction' : `~${formatSize(estimatedCompressedSize)}`}
@@ -387,9 +441,10 @@ function App() {
                     {/* Action Button */}
                     <div className="mt-8 pt-6 border-t border-gray-100 flex justify-end">
                       <button 
+                        type="button"
                         onClick={handleCompress}
                         disabled={isCompressing}
-                        className="w-full md:w-auto bg-gray-900 hover:bg-black text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center disabled:opacity-70 shadow-lg shadow-gray-200"
+                        className="w-full md:w-auto bg-gray-900 hover:bg-black text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center disabled:opacity-70 shadow-lg shadow-gray-200 cursor-pointer"
                       >
                         {isCompressing ? (
                           <>
@@ -409,16 +464,16 @@ function App() {
               </>
             ) : (
               /* Results Area */
-              <div className="text-center py-8 animate-in zoom-in-95 duration-500">
-                <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <CheckCircle className="w-10 h-10 text-green-600" />
+              <div className="text-center py-6 md:py-8 animate-in zoom-in-95 duration-500">
+                <div className="w-16 h-16 md:w-20 md:h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <CheckCircle className="w-8 h-8 md:w-10 md:h-10 text-green-600" />
                 </div>
-                <h2 className="text-2xl font-bold text-gray-900 mb-2">Compression Complete!</h2>
-                <p className="text-gray-500 mb-8">Your files have been compressed successfully.</p>
+                <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">Compression Complete!</h2>
+                <p className="text-gray-500 mb-6 md:mb-8 text-sm md:text-base">Your files have been compressed successfully.</p>
                 
-                <div className="bg-gray-50 rounded-2xl p-6 mb-8 text-left max-w-lg mx-auto border border-gray-100">
+                <div className="bg-gray-50 rounded-2xl p-4 md:p-6 mb-8 text-left max-w-lg mx-auto border border-gray-100">
                   <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-4 border-b border-gray-200 pb-2">Results</h4>
-                  <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
+                  <div className="space-y-4 max-h-96 overflow-y-auto pr-1">
                     {results.files.map((fileResult, idx) => {
                       const savings = fileResult.originalSize > 0 
                           ? Math.max(0, Math.round(((fileResult.originalSize - fileResult.compressedSize) / fileResult.originalSize) * 100))
@@ -429,8 +484,8 @@ function App() {
 
                       return (
                       <div key={idx} className="flex flex-col bg-white p-4 rounded-xl shadow-sm border border-gray-100 transition-all">
-                         <div className="flex flex-col sm:flex-row sm:items-center justify-between">
-                             <div className="flex-1 mb-3 sm:mb-0">
+                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                             <div className="flex-1">
                                  <div className="font-medium text-gray-900 truncate" title={fileResult.originalName}>
                                     {fileResult.originalName}
                                  </div>
@@ -447,6 +502,7 @@ function App() {
                              {!isRecompressing && (
                                  <div className="flex space-x-2">
                                     <button
+                                      type="button"
                                       onClick={() => setRecompressState(prev => ({ ...prev, [idx]: { isOpen: true, level: 50, loading: false } }))}
                                       className="inline-flex items-center justify-center px-3 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 font-medium transition-colors text-sm border border-gray-200"
                                       title="Recompress with different level"
@@ -455,7 +511,7 @@ function App() {
                                       Retry
                                     </button>
                                     <a
-                                      href={fileResult.downloadUrl || `/api/download/${fileResult.id}`}
+                                      href={getDownloadUrl(fileResult.downloadUrl || fileResult.id)}
                                       download={`compressed_${fileResult.originalName}`}
                                       className="inline-flex items-center justify-center px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 font-medium transition-colors text-sm"
                                     >
@@ -481,6 +537,7 @@ function App() {
                                 />
                                 <div className="flex justify-end space-x-2">
                                    <button 
+                                     type="button"
                                      onClick={() => setRecompressState(prev => { const next = {...prev}; delete next[idx]; return next; })}
                                      disabled={rState.loading}
                                      className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700 font-medium"
@@ -488,6 +545,7 @@ function App() {
                                      Cancel
                                    </button>
                                    <button 
+                                     type="button"
                                      onClick={() => handleRecompressSubmit(idx)}
                                      disabled={rState.loading}
                                      className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg flex items-center transition-colors disabled:opacity-70"
@@ -506,8 +564,9 @@ function App() {
 
                 <div className="flex flex-col sm:flex-row items-center justify-center space-y-3 sm:space-y-0 sm:space-x-4">
                   <button
+                    type="button"
                     onClick={handleDownloadAll}
-                    className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center shadow-lg shadow-blue-200"
+                    className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center shadow-lg shadow-blue-200 cursor-pointer"
                   >
                     {results.files.length > 1 ? (
                       <>
@@ -522,8 +581,9 @@ function App() {
                     )}
                   </button>
                   <button 
+                    type="button"
                     onClick={reset}
-                    className="w-full sm:w-auto bg-white border-2 border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-3 px-8 rounded-xl transition-all"
+                    className="w-full sm:w-auto bg-white border-2 border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-3 px-8 rounded-xl transition-all cursor-pointer"
                   >
                     Compress Another
                   </button>
@@ -536,12 +596,15 @@ function App() {
 
       {/* Footer */}
       <footer className="bg-white border-t border-gray-200 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col md:flex-row items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8 flex flex-col md:flex-row items-center justify-between gap-4">
           <p className="text-gray-500 text-sm">
             © {new Date().getFullYear()} PDFCompressor. All rights reserved.
           </p>
-          <div className="flex space-x-6 mt-4 md:mt-0">
-            <span className="text-xs text-gray-400">Direct Fast Compression Engine</span>
+          <div className="flex items-center space-x-4 text-xs text-gray-400">
+            <span className="flex items-center">
+              <span className="w-2 h-2 rounded-full bg-green-500 inline-block mr-1.5"></span>
+              Fast Ghostscript Compression
+            </span>
           </div>
         </div>
       </footer>

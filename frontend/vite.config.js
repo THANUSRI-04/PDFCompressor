@@ -33,10 +33,15 @@ export default defineConfig({
             purpose: 'any maskable'
           }
         ]
+      },
+      workbox: {
+        navigateFallbackDenylist: [/^\/api/]
       }
     })
   ],
   server: {
+    host: true, // Listen on 0.0.0.0 so mobile devices on the same Wi-Fi can connect
+    port: 5173,
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
