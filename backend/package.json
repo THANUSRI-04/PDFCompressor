@@ -13,8 +13,13 @@
   "type": "commonjs",
   "dependencies": {
     "archiver": "^8.0.0",
+    "axios": "^1.19.0",
+    "bullmq": "^6.2.0",
     "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "http-proxy-middleware": "^4.2.0",
+    "ioredis": "^6.0.0",
     "multer": "^2.2.0",
     "uuid": "^14.0.2"
   }

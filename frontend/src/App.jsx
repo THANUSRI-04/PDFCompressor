@@ -5,10 +5,13 @@ import axios from 'axios';
 
 function App() {
   const [files, setFiles] = useState([]);
+  const [compressionMode, setCompressionMode] = useState('percentage'); // 'percentage' or 'target'
   const [compressionPercent, setCompressionPercent] = useState(50);
+  const [targetSizeMB, setTargetSizeMB] = useState(5);
   const [isCompressing, setIsCompressing] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+  const [recompressState, setRecompressState] = useState({});
 
   const onDrop = useCallback((acceptedFiles) => {
     // Only accept PDFs, dropzone handles this partially, but let's be sure
@@ -39,61 +42,110 @@ function App() {
     setIsCompressing(true);
     setError(null);
 
+    const totalOrigSize = files.reduce((acc, file) => acc + file.size, 0);
+    
+    let finalLevel = compressionPercent;
+    if (compressionMode === 'target') {
+        const targetBytes = targetSizeMB * 1024 * 1024;
+        const reductionNeeded = 1 - (targetBytes / totalOrigSize);
+        // Map required reduction to our 0-100 scale (where 100% slider = ~85% reduction)
+        const mappedPercent = Math.max(0, Math.min(100, Math.round((reductionNeeded * 100) / 0.85)));
+        finalLevel = mappedPercent;
+    }
+
     const formData = new FormData();
     files.forEach(file => {
       formData.append('pdfs', file);
     });
-    formData.append('level', compressionPercent.toString());
+    formData.append('level', finalLevel.toString());
 
     try {
-      const response = await axios.post('/api/compress', formData, {
-        responseType: 'blob', // To handle file download
-      });
+      const { data } = await axios.post('/api/compress', formData);
+      const { jobId } = data;
 
-      // Try to get metadata from headers
-      const resultsHeader = response.headers['x-compression-results'];
-      let metadata = [];
-      if (resultsHeader) {
-         metadata = JSON.parse(resultsHeader);
-      } else {
-         // Fallback if header is missing
-         metadata = files.map(f => ({
-            originalName: f.name,
-            originalSize: f.size,
-            compressedSize: response.data.size
-         }));
-      }
-
-      setResults({
-        metadata,
-        blob: response.data,
-        isZip: files.length > 1
-      });
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await axios.get(`/api/jobs/${jobId}`);
+          if (statusRes.data.state === 'completed') {
+            clearInterval(pollInterval);
+            setResults({
+              files: statusRes.data.returnvalue.metadata.map((meta, i) => ({
+                ...meta,
+                jobId: jobId,
+                fileIndex: i,
+                originalFileIndex: i
+              }))
+            });
+            setIsCompressing(false);
+          } else if (statusRes.data.state === 'failed') {
+            clearInterval(pollInterval);
+            setError('Compression failed: ' + (statusRes.data.failedReason || 'Unknown error'));
+            setIsCompressing(false);
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          setError('Failed to fetch job status.');
+          setIsCompressing(false);
+        }
+      }, 2000);
 
     } catch (err) {
       console.error(err);
-      setError('An error occurred during compression. Please try again.');
-    } finally {
+      setError('An error occurred during upload. Please try again.');
       setIsCompressing(false);
     }
   };
 
-  const handleDownload = () => {
-    if (!results) return;
-    
-    const url = window.URL.createObjectURL(new Blob([results.blob]));
-    const link = document.createElement('a');
-    link.href = url;
-    
-    if (results.isZip) {
-      link.setAttribute('download', 'compressed_pdfs.zip');
-    } else {
-      link.setAttribute('download', `compressed_${results.metadata[0].originalName}`);
+  const handleRecompressSubmit = async (idx) => {
+    const fileResult = results.files[idx];
+    const originalFile = files[fileResult.originalFileIndex];
+    if (!originalFile) return;
+
+    setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: true } }));
+
+    const formData = new FormData();
+    formData.append('pdfs', originalFile);
+    formData.append('level', recompressState[idx].level.toString());
+
+    try {
+      const { data } = await axios.post('/api/compress', formData);
+      const pollJobId = data.jobId;
+
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await axios.get(`/api/jobs/${pollJobId}`);
+          if (statusRes.data.state === 'completed') {
+            clearInterval(pollInterval);
+            const newMeta = statusRes.data.returnvalue.metadata[0];
+            
+            setResults(prev => {
+              const newFiles = [...prev.files];
+              newFiles[idx] = {
+                ...newMeta,
+                jobId: pollJobId,
+                fileIndex: 0,
+                originalFileIndex: fileResult.originalFileIndex
+              };
+              return { files: newFiles };
+            });
+            
+            setRecompressState(prev => {
+              const next = { ...prev };
+              delete next[idx];
+              return next;
+            });
+          } else if (statusRes.data.state === 'failed') {
+            clearInterval(pollInterval);
+            setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Failed' } }));
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Error' } }));
+        }
+      }, 2000);
+    } catch (err) {
+      setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], loading: false, error: 'Error' } }));
     }
-    
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   const reset = () => {
@@ -101,6 +153,9 @@ function App() {
     setResults(null);
     setError(null);
     setCompressionPercent(50);
+    setCompressionMode('percentage');
+    setTargetSizeMB(5);
+    setRecompressState({});
   };
 
   const formatSize = (bytes) => {
@@ -118,8 +173,19 @@ function App() {
   };
 
   const totalOriginalSize = files.reduce((acc, file) => acc + file.size, 0);
-  const estimatedReduction = Math.round(compressionPercent * 0.85);
-  const estimatedCompressedSize = totalOriginalSize * (1 - estimatedReduction / 100);
+  
+  let effectivePercent = compressionPercent;
+  let estimatedCompressedSize = 0;
+  let estimatedReduction = 0;
+
+  if (compressionMode === 'percentage') {
+      estimatedReduction = Math.round(effectivePercent * 0.85);
+      estimatedCompressedSize = totalOriginalSize * (1 - estimatedReduction / 100);
+  } else {
+      estimatedCompressedSize = targetSizeMB * 1024 * 1024;
+      if (estimatedCompressedSize > totalOriginalSize) estimatedCompressedSize = totalOriginalSize;
+      estimatedReduction = totalOriginalSize > 0 ? Math.round(((totalOriginalSize - estimatedCompressedSize) / totalOriginalSize) * 100) : 0;
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
@@ -217,27 +283,65 @@ function App() {
 
                     {/* Compression Options */}
                     <div className="mt-8">
-                      <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-4 flex items-center">
-                        <Settings className="w-4 h-4 mr-2" />
-                        Compression Level
+                      <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-4 flex items-center justify-between">
+                        <span className="flex items-center">
+                           <Settings className="w-4 h-4 mr-2" />
+                           Compression Mode
+                        </span>
+                        <div className="flex bg-gray-100 rounded-lg p-1">
+                           <button 
+                             onClick={() => setCompressionMode('percentage')}
+                             className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${compressionMode === 'percentage' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                           >
+                             Percentage
+                           </button>
+                           <button 
+                             onClick={() => setCompressionMode('target')}
+                             className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${compressionMode === 'target' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                           >
+                             Target Size
+                           </button>
+                        </div>
                       </h4>
                       <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-                        <div className="flex justify-between items-center mb-4">
-                          <span className="text-sm font-medium text-gray-500">0%</span>
-                          <span className="text-2xl font-bold text-blue-600">{compressionPercent}%</span>
-                          <span className="text-sm font-medium text-gray-500">100%</span>
-                        </div>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="100" 
-                          value={compressionPercent}
-                          onChange={(e) => setCompressionPercent(parseInt(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mb-6"
-                        />
+                        
+                        {compressionMode === 'percentage' ? (
+                            <>
+                                <div className="flex justify-between items-center mb-4">
+                                  <span className="text-sm font-medium text-gray-500">0%</span>
+                                  <span className="text-2xl font-bold text-blue-600">{compressionPercent}%</span>
+                                  <span className="text-sm font-medium text-gray-500">100%</span>
+                                </div>
+                                <input 
+                                  type="range" 
+                                  min="0" 
+                                  max="100" 
+                                  value={compressionPercent}
+                                  onChange={(e) => setCompressionPercent(parseInt(e.target.value))}
+                                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mb-6"
+                                />
+                            </>
+                        ) : (
+                            <div className="mb-6">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Target Total Size (MB)</label>
+                                <div className="flex items-center">
+                                    <input 
+                                      type="number"
+                                      min="0.1"
+                                      step="0.1"
+                                      value={targetSizeMB}
+                                      onChange={(e) => setTargetSizeMB(parseFloat(e.target.value) || 0)}
+                                      className="w-full bg-gray-50 border border-gray-300 text-gray-900 text-lg rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-3"
+                                    />
+                                    <span className="ml-3 text-gray-500 font-medium">MB</span>
+                                </div>
+                                <p className="text-xs text-gray-400 mt-2">Note: Ghostscript cannot target exact file sizes. The server will select the closest compression preset based on your target.</p>
+                            </div>
+                        )}
+
                         <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 flex flex-col sm:flex-row justify-between items-center text-sm">
                           <div className="mb-2 sm:mb-0">
-                            <span className="text-gray-500 mr-2">Original Size:</span>
+                            <span className="text-gray-500 mr-2">Original Total:</span>
                             <span className="font-semibold text-gray-900">{formatSize(totalOriginalSize)}</span>
                           </div>
                           <div className="mb-2 sm:mb-0">
@@ -247,7 +351,7 @@ function App() {
                             </span>
                           </div>
                           <div>
-                            <span className="text-gray-500 mr-2">Estimated Reduction:</span>
+                            <span className="text-gray-500 mr-2">Est. Reduction:</span>
                             <span className="font-semibold text-green-600">
                               {totalOriginalSize < 100 * 1024 ? '0%' : `~${estimatedReduction}%`}
                             </span>
@@ -290,42 +394,107 @@ function App() {
                 
                 <div className="bg-gray-50 rounded-2xl p-6 mb-8 text-left max-w-lg mx-auto border border-gray-100">
                   <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-4 border-b border-gray-200 pb-2">Results</h4>
-                  <div className="space-y-4 max-h-64 overflow-y-auto">
-                    {results.metadata.map((meta, idx) => (
-                      <div key={idx} className="flex flex-col bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-                         <div className="font-medium text-gray-900 truncate mb-2" title={meta.originalName}>
-                            {meta.originalName}
+                  <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
+                    {results.files.map((fileResult, idx) => {
+                      const savings = fileResult.originalSize > 0 
+                          ? Math.max(0, Math.round(((fileResult.originalSize - fileResult.compressedSize) / fileResult.originalSize) * 100))
+                          : 0;
+                          
+                      const isRecompressing = recompressState[idx]?.isOpen;
+                      const rState = recompressState[idx];
+
+                      return (
+                      <div key={idx} className="flex flex-col bg-white p-4 rounded-xl shadow-sm border border-gray-100 transition-all">
+                         <div className="flex flex-col sm:flex-row sm:items-center justify-between">
+                             <div className="flex-1 mb-3 sm:mb-0">
+                                 <div className="font-medium text-gray-900 truncate" title={fileResult.originalName}>
+                                    {fileResult.originalName}
+                                 </div>
+                                 <div className="flex items-center text-sm mt-1 text-gray-500 space-x-2">
+                                   <span>{(fileResult.originalSize / 1024 / 1024).toFixed(2)} MB</span>
+                                   <span>→</span>
+                                   <span className="font-medium text-green-600">{(fileResult.compressedSize / 1024 / 1024).toFixed(2)} MB</span>
+                                   <span className="bg-green-100 text-green-700 py-0.5 px-2 rounded-full text-xs font-semibold ml-2">
+                                      -{savings}%
+                                   </span>
+                                 </div>
+                             </div>
+                             
+                             {!isRecompressing && (
+                                 <div className="flex space-x-2">
+                                    <button
+                                      onClick={() => setRecompressState(prev => ({ ...prev, [idx]: { isOpen: true, level: 50, loading: false } }))}
+                                      className="inline-flex items-center justify-center px-3 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 font-medium transition-colors text-sm border border-gray-200"
+                                    >
+                                      <Settings className="w-4 h-4 mr-1.5" />
+                                      Retry
+                                    </button>
+                                    <a
+                                      href={`/api/jobs/${fileResult.jobId}/download/${fileResult.fileIndex}`}
+                                      download={`compressed_${fileResult.originalName}`}
+                                      className="inline-flex items-center justify-center px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 font-medium transition-colors text-sm"
+                                    >
+                                      <Download className="w-4 h-4 mr-1.5" />
+                                      Download
+                                    </a>
+                                 </div>
+                             )}
                          </div>
-                         <div className="grid grid-cols-3 gap-2 text-sm">
-                            <div>
-                               <p className="text-gray-500 text-xs">Original Size</p>
-                               <p className="font-semibold text-gray-700">{formatSize(meta.originalSize)}</p>
-                            </div>
-                            <div>
-                               <p className="text-gray-500 text-xs">Compressed</p>
-                               <p className="font-semibold text-green-600">{formatSize(meta.compressedSize)}</p>
-                            </div>
-                            <div>
-                               <p className="text-gray-500 text-xs">Reduced By</p>
-                               {calculateReduction(meta.originalSize, meta.compressedSize) > 0 ? (
-                                  <p className="font-semibold text-blue-600">{calculateReduction(meta.originalSize, meta.compressedSize)}%</p>
-                               ) : (
-                                  <p className="font-semibold text-gray-500 text-xs mt-0.5 leading-tight">No significant<br/>reduction</p>
-                               )}
-                            </div>
-                         </div>
+
+                         {isRecompressing && (
+                             <div className="mt-4 pt-4 border-t border-gray-100 animate-in slide-in-from-top-2 duration-300">
+                                <div className="flex justify-between items-center mb-2">
+                                   <label className="text-xs font-medium text-gray-500 uppercase tracking-wider">New Compression Level</label>
+                                   <span className="text-sm font-bold text-blue-600">{rState.level}%</span>
+                                </div>
+                                <input 
+                                  type="range" min="0" max="100" 
+                                  value={rState.level}
+                                  onChange={(e) => setRecompressState(prev => ({ ...prev, [idx]: { ...prev[idx], level: parseInt(e.target.value) } }))}
+                                  disabled={rState.loading}
+                                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mb-4"
+                                />
+                                <div className="flex justify-end space-x-2">
+                                   <button 
+                                     onClick={() => setRecompressState(prev => { const next = {...prev}; delete next[idx]; return next; })}
+                                     disabled={rState.loading}
+                                     className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700 font-medium"
+                                   >
+                                     Cancel
+                                   </button>
+                                   <button
+                                     onClick={() => handleRecompressSubmit(idx)}
+                                     disabled={rState.loading}
+                                     className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg flex items-center transition-colors disabled:opacity-70"
+                                   >
+                                     {rState.loading ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <CheckCircle className="w-4 h-4 mr-1.5" />}
+                                     {rState.loading ? 'Compressing...' : 'Apply'}
+                                   </button>
+                                </div>
+                                {rState.error && <p className="text-xs text-red-500 mt-2 text-right">{rState.error}</p>}
+                             </div>
+                         )}
                       </div>
-                    ))}
+                    )})}
                   </div>
                 </div>
 
                 <div className="flex flex-col sm:flex-row items-center justify-center space-y-3 sm:space-y-0 sm:space-x-4">
-                  <button 
-                    onClick={handleDownload}
+                  <button
+                    onClick={() => {
+                      results.files.forEach((fileResult) => {
+                        const link = document.createElement('a');
+                        link.href = `/api/jobs/${fileResult.jobId}/download/${fileResult.fileIndex}`;
+                        link.setAttribute('download', `compressed_${fileResult.originalName}`);
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      });
+                    }}
                     className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium py-3.5 px-8 rounded-xl transition-all flex items-center justify-center shadow-lg shadow-blue-200"
                   >
                     <Download className="w-5 h-5 mr-2" />
-                    Download {results.isZip ? 'All (ZIP)' : 'PDF'}
+                    {results.files.length > 1 ? 'Download All Files' : 'Download PDF'}
                   </button>
                   <button 
                     onClick={reset}
