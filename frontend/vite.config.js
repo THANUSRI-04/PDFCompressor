@@ -16,6 +16,9 @@ export default defineConfig({
         short_name: 'PDFCompress',
         description: 'Compress PDF files directly on your device',
         theme_color: '#3b82f6',
+        background_color: '#ffffff',
+        display: 'standalone',
+        start_url: '/',
         icons: [
           {
             src: 'icon.svg',
